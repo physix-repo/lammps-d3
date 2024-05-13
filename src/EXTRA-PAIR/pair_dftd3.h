@@ -54,6 +54,7 @@ class PairDFTD3 : public Pair {
 
   void allocate();
   void calc_NCo();
+  double getc6(int, int, double, double);
 
 };
 

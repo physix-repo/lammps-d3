@@ -34,6 +34,9 @@
 #include "memory.h"
 #include "error.h"
 
+#include "potential_file_reader.h"
+
+
 /* ---------------------------------------------------------------------------------------------------------- */
 
 using namespace LAMMPS_NS;
@@ -208,21 +211,10 @@ void PairDFTD3::compute(int eflag, int vflag)
         r8inv = r2inv*r2inv*r2inv*r2inv;
         r10inv = r2inv*r2inv*r2inv*r2inv*r2inv;
 
-        //set_r0
         rr = r/r0ab[itype][jtype];
 
-        //calc_c6()   // IMP --> write this function
-        //calc_c8()   // IMP --> write this function
-
-        double C6 = 1; // change here
+        double C6 = getc6(itype,jtype,NCo[i],NCo[j]);
         double C8 = 3.0*C6*r2r4[itype]*r2r4[jtype];
-
-        //set_parameters()
-
-        // we assume pbe here
-        // PBE {1.0, 1.217, 0.722, 0.0, 14.0}},
-
-        // double sc=1.0; double s8=0.722; double sr6= 1.217; double sr8= 1.0;
 
         double alp6 = alpha;
         double alp8 = alpha+2;
@@ -390,6 +382,56 @@ void PairDFTD3::calc_NCo()
 
 /* ---------------------------------------------------------------------------------------------------------- */
 
+double PairDFTD3::getc6(int iat, int jat, double cni, double cnj){
+
+  double c6_ref, itype, jtype, cni_ref, cnj_ref;
+  double c6, c6mem, r, r_save, rsum, csum, tmp;
+
+  c6 = 0; c6mem=-1.0E99, rsum = 0; csum = 0, r_save = 1.0E99;
+
+  if (comm->me == 0) {
+
+    PotentialFileReader reader(lmp, "../../potentials/pars.dtd3", "DFTD3", false);
+    char *line;
+
+    while ((line = reader.next_line(NPARAMS_PER_LINE))) {
+      try {
+        ValueTokenizer values(line);
+
+        c6_ref  = values.next_double();
+        itype   = values.next_double();
+        jtype   = values.next_double();
+        cni_ref = values.next_double();
+        cnj_ref = values.next_double();
+
+      } catch (TokenizerException &e) {
+        error->one(FLERR, e.what());
+      }
+
+      if (itype == iat && jtype == jat){
+        r = (cni - cni_ref) * (cni - cni_ref) + (cnj - cnj_ref) * (cnj - cnj_ref);
+
+        if (r < r_save) {
+          r_save = r;
+          c6mem = c6_ref;
+        }
+
+        tmp = exp(K3*r); 
+        rsum += tmp;
+        csum += tmp * c6_ref;
+      }
+    }
+
+    if (rsum > 1.0E-99) {
+      c6 = csum / rsum;
+    } else {
+      c6 = c6mem;
+    }
+  }  
+  return c6;
+}
+
+/* ---------------------------------------------------------------------------------------------------------- */
 
 int PairDFTD3::pack_forward_comm(int n, int *list, double *buf, int /*pbc_flag*/, int * /*pbc*/)
 {
