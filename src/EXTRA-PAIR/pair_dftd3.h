@@ -36,6 +36,7 @@ class PairDFTD3 : public Pair {
   void compute(int, int) override;
   void settings(int, char **) override;
   void coeff(int, char **) override;
+  void init_style() override;
   double init_one(int, int) override;
 
 
@@ -47,9 +48,11 @@ class PairDFTD3 : public Pair {
  protected:
 
   double cutoff, scale6, scale8;
-  double **r0ab, rscale6, rscale8, alpha;
+  double **cut,**r0ab, rscale6, rscale8, alpha;
 
-  int nmax, *NCo;  
+  int nmax, *NCo;
+  
+  int pgsize, oneatom;
   MyPage<int> *ipage;
 
   void allocate();

@@ -57,8 +57,8 @@ static constexpr double K3 = -4.0;
     values >5 might lead to bumps in the potential.
 */
 
-static constexpr double cn_thr = 400;  // 20*20 Bohr^2 ; 20 Bohr = 10.58 Angstrom
-static constexpr double cutoff = 1400;
+static constexpr double cn_thr = 100;  // 20*20 Bohr^2 ; 20 Bohr = 10.58 Angstrom  : 400
+//static constexpr double cutoff = 1400;
 
 static constexpr int NPARAMS_PER_LINE = 5;
 static constexpr int NUM_ELEMENTS = 94;
@@ -126,6 +126,8 @@ PairDFTD3::PairDFTD3(LAMMPS *lmp) : Pair(lmp)
   map = nullptr;
 
   ipage = nullptr;
+  pgsize = oneatom = 0;
+
   r0ab = nullptr;
 
   comm_forward = 1;
@@ -143,6 +145,7 @@ PairDFTD3::~PairDFTD3()
   if (allocated) {
     memory->destroy(setflag);
     memory->destroy(cutsq);
+    memory->destroy(cut);
 
     memory->destroy(r0ab);
   }
@@ -163,11 +166,13 @@ void PairDFTD3::compute(int eflag, int vflag)
   evdwl = 0.0;
   ev_init(eflag,vflag);
 
+  error->warning(FLERR,"CN calculation...");
   calc_NCo();
+  error->warning(FLERR,"Done");
 
   double **x = atom->x;
   double **f = atom->f;
-  int *type = atom->type;
+  int *type  = atom->type;
   int nlocal = atom->nlocal;
 
   double *special_lj = force->special_lj;   
@@ -203,7 +208,8 @@ void PairDFTD3::compute(int eflag, int vflag)
 
       rsq = delx*delx + dely*dely + delz*delz;
     
-      if (rsq < cutsq[itype][jtype]) {
+//      if (rsq < cutsq[itype][jtype]) {
+      if (rsq < cutoff*cutoff) {
 
         r = sqrt(rsq);
         r2inv = 1.0/rsq;
@@ -213,8 +219,10 @@ void PairDFTD3::compute(int eflag, int vflag)
 
         rr = r/r0ab[itype][jtype];
 
+        error->warning(FLERR,"C6 calculation...");
         double C6 = getc6(itype,jtype,NCo[i],NCo[j]);
         double C8 = 3.0*C6*r2r4[itype]*r2r4[jtype];
+        error->warning(FLERR,"Done");
 
         double alp6 = alpha;
         double alp8 = alpha+2;
@@ -261,13 +269,27 @@ void PairDFTD3::settings(int narg, char **arg)
 {
   if (narg != 3) error->all(FLERR,"Illegal pair_style command");
 
+  error->warning(FLERR,"Setting...");
   cutoff = utils::numeric(FLERR,arg[0],false,lmp);
   scale6 = utils::numeric(FLERR,arg[1],false,lmp);
   scale8 = utils::numeric(FLERR,arg[2],false,lmp);
+  error->warning(FLERR,"Done");
+
+  if (allocated) {
+    for (int i = 1; i <= atom->ntypes; i++)
+      for (int j = i; j <= atom->ntypes; j++)
+        if (setflag[i][j]) cut[i][j] = cutoff;
+  }
+  error->warning(FLERR,"ntypes :");
+  error->warning(FLERR,std::to_string(atom->ntypes));
+
 }
 
 void PairDFTD3::coeff(int narg, char **arg)
 {
+  error->warning(FLERR,"Coefficients...");
+  if (narg < 6 || narg > 7) error->all(FLERR, "Incorrect args for pair coefficients");
+
   if (!allocated) allocate();
 
   int ilo,ihi,jlo,jhi;
@@ -279,24 +301,64 @@ void PairDFTD3::coeff(int narg, char **arg)
   rscale8 = utils::numeric(FLERR,arg[4],false,lmp);
   alpha = utils::numeric(FLERR,arg[5],false,lmp);
 
+  double cut_one = cutoff;
+  if (narg == 4) cut_one = utils::numeric(FLERR, arg[6], false, lmp);
+
   for (int i = ilo; i <= ihi; i++) {
     for (int j = MAX(jlo,i); j <= jhi; j++) {
       r0ab[i][j] = r0ab_one;
       setflag[i][j] = 1;
     }
   }
+  error->warning(FLERR,"Done");
+
+}
+
+/* ---------------------------------------------------------------------------------------------------------- */
+
+void PairDFTD3::init_style()
+{
+  if (atom->tag_enable == 0)
+    error->all(FLERR,"Pair style DFTD3 requires atom IDs");
+  if (force->newton_pair == 0)
+    error->all(FLERR,"Pair style DFTD3 requires newton pair on");
+
+// need a full neighbor list
+  neighbor->add_request(this, NeighConst::REQ_FULL | NeighConst::REQ_GHOST);
+
+  // create pages if first time or if neighbor pgsize/oneatom has changed
+  int create = 0;
+  if (ipage == nullptr) create = 1;
+  if (pgsize != neighbor->pgsize) create = 1;
+  if (oneatom != neighbor->oneatom) create = 1;
+
+  if (create) {
+    delete[] ipage;
+    pgsize = neighbor->pgsize;
+    oneatom = neighbor->oneatom;
+
+    int nmypage = comm->nthreads;
+    ipage = new MyPage<int>[nmypage];
+    for (int i = 0; i < nmypage; i++)
+      ipage[i].init(oneatom,pgsize);
+  }
 }
 
 double PairDFTD3::init_one(int i, int j)
 {
+  error->warning(FLERR,"Initializing...");
   if (setflag[i][j] == 0) error->all(FLERR,"All pair coeffs are not set");
-  cutsq[j][i] = cutsq[i][j] = cutoff;
+  cut[j][i] = cut[i][j] = cutoff;
   return cutoff;
+  error->warning(FLERR,"Done...");
+
 }
 /* ---------------------------------------------------------------------------------------------------------- */
 
 void PairDFTD3::allocate()
 {
+  error->warning(FLERR,"Allocating...");
+
   allocated = 1;
   int n = atom->ntypes;
 
@@ -307,8 +369,10 @@ void PairDFTD3::allocate()
     for (int j = i; j <= n; j++)
       setflag[i][j] = 0;
 
+  memory->create(cut,n+1,n+1,"pair:cut");
   memory->create(cutsq,n+1,n+1,"pair:cutsq");
   memory->create(r0ab,n+1,n+1,"pair:r0ab");                   // not sure about this
+  error->warning(FLERR,"Done");
 
 }
 
@@ -329,7 +393,8 @@ void PairDFTD3::calc_NCo()
     //memory->grow(bbij,nmax,MAXNEIGH,"pair:bbij");
   }
 
-  inum = list->inum + list->gnum; // !
+
+  inum = list->inum ;// !
   ilist = list->ilist;
   numneigh = list->numneigh;
   firstneigh = list->firstneigh;
@@ -343,6 +408,11 @@ void PairDFTD3::calc_NCo()
     neighptrj = ipage->vget();
 
     itype = map[type[i]];
+
+    error->warning(FLERR,"itype : ");
+    error->warning(FLERR,std::to_string(itype));
+    error->warning(FLERR,std::to_string(type[i]));
+
     jlist = firstneigh[i];
     jnum = numneigh[i];
 
@@ -359,16 +429,23 @@ void PairDFTD3::calc_NCo()
     
       rsq = delrj[0]*delrj[0] + delrj[1]*delrj[1] + delrj[2]*delrj[2];
 
+      error->warning(FLERR,"... before if ...");
+
       if (rsq > cn_thr) continue; //    warning HERE 
 
       neighptrj[nj++] = j;
-
+  
       rr = sqrt(rsq);
+      error->warning(FLERR,"... before rcov ...");
       rco = rcov[itype] + rcov[jtype];
 
+      error->warning(FLERR,"... NCo calculation ...");
       NCo[i] += 1.0 / (1.0 + exp(K1 * ((rco/rr)-1.0)));
+      error->warning(FLERR,"... NCo calculation done ...");
 
     }
+
+    error->warning(FLERR,"...after if...");
 
     ipage->vgot(nj);
 
