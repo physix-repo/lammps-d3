@@ -50,7 +50,8 @@ class PairDFTD3 : public Pair {
   double cutoff, scale6, scale8;
   double **cut,**r0ab, rscale6, rscale8, alpha;
 
-  int nmax, *NCo;
+  int nmax;
+  double *NCo;
   
   int pgsize, oneatom;
   MyPage<int> *ipage;
@@ -58,6 +59,7 @@ class PairDFTD3 : public Pair {
   void allocate();
   void calc_NCo();
   double getc6(int, int, double, double);
+  double* getdc6(int, int, double, double);
 
 };
 

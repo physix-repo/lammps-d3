@@ -42,11 +42,11 @@ mass            1       28.06
 
 velocity        all create 50 5287287 loop geom
 
-pair_style      dftd3 15.0 1 0.722
-pair_coeff      * * 1.75 1.217 1 14
+pair_style      dftd3 10.0 1 0.722 1.217 1 14
+pair_coeff      1 1 14 14 1.75
 
 thermo_style    custom step temp epair etotal econserve press
-thermo          10
+thermo          1
 
 fix             1 all nvt temp 50 50 0.1
 

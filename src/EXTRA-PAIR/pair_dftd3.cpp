@@ -68,6 +68,7 @@ static constexpr int NUM_ELEMENTS = 94;
 
 // these new data are scaled with k2=4.0/3.0  and converted via
 // autoang=0.52917726 :           rcov=k2*rcov/autoang
+// so this covalent radii shoud be in Angstrom units
 
 std::array<double, NUM_ELEMENTS> rcov = {
     0.80628308, 1.15903197, 3.02356173, 2.36845659, 1.94011865,
@@ -90,6 +91,8 @@ std::array<double, NUM_ELEMENTS> rcov = {
     3.57788113, 5.06446567, 4.56053862, 4.20778980, 3.98102289,
     3.82984466, 3.85504098, 3.88023730, 3.90543362
 };
+
+static constexpr double autoang = 0.52917726 ;
 
 //  r2r4 = sqrt(0.5*r2r4(i)*dfloat(i)**0.5 ) with i=elementnumber
 //  the large number of digits is just to keep the results consistent
@@ -162,13 +165,12 @@ void PairDFTD3::compute(int eflag, int vflag)
   double xtmp,ytmp,ztmp,delx,dely,delz,evdwl,fpair,factor_lj;
   double rsq,r,rr,dexp,r2inv,r6inv,r8inv,r10inv,ddexp,invexp;
   double t6,damp6,e6,tmp6,t8,damp8,e8,tmp8;
+  double rcovij, expterm, dcn;
 
   evdwl = 0.0;
   ev_init(eflag,vflag);
 
-  error->warning(FLERR,"CN calculation...");
   calc_NCo();
-  error->warning(FLERR,"Done");
 
   double **x = atom->x;
   double **f = atom->f;
@@ -178,7 +180,7 @@ void PairDFTD3::compute(int eflag, int vflag)
   double *special_lj = force->special_lj;   
   int newton_pair = force->newton_pair;
 
-  inum = list->inum;                
+  inum = list->inum;  
   ilist = list->ilist;
   numneigh = list->numneigh;
   firstneigh = list->firstneigh;
@@ -208,7 +210,7 @@ void PairDFTD3::compute(int eflag, int vflag)
 
       rsq = delx*delx + dely*dely + delz*delz;
     
-//      if (rsq < cutsq[itype][jtype]) {
+//     if (rsq < cutsq[itype][jtype]) {
       if (rsq < cutoff*cutoff) {
 
         r = sqrt(rsq);
@@ -219,27 +221,37 @@ void PairDFTD3::compute(int eflag, int vflag)
 
         rr = r/r0ab[itype][jtype];
 
-        error->warning(FLERR,"C6 calculation...");
-        double C6 = getc6(itype,jtype,NCo[i],NCo[j]);
+        double* c6_res = getdc6(itype,jtype,NCo[i],NCo[j]);
+
+        double C6 = c6_res[0];
         double C8 = 3.0*C6*r2r4[itype]*r2r4[jtype];
-        error->warning(FLERR,"Done");
 
         double alp6 = alpha;
         double alp8 = alpha+2;
 
         // we assume DFTD3 zero damping here
-        t6=pow(rscale6/r,alp6);
-        damp6 = 1.0/( 1.0+6.0*t6 );
-        t8=pow(rscale8/r,alp8);
-        damp8 =1.0/( 1.0+6.0*t8 );
+        t6 = pow(rscale6/rr,alp6);
+        damp6 = 1.0/(1.0+6.0*t6 );
+        t8 = pow(rscale8/rr,alp8);
+        damp8 =1.0/(1.0+6.0*t8 );
 
         e6 = -scale6*C6*damp6*r6inv;
         e8 = -scale8*C8*damp8*r8inv;
 
         tmp6 = 6*scale6*C6*r8inv*damp6;
         tmp8 = 8*scale8*C8*r10inv*damp8;
-        fpair = - tmp6 + (tmp6*alp6*t6*damp6) - tmp8 + (3/4*tmp8*alp8*t8*damp8);
 
+        // here we calculate dcn = dCNi/dr = dCNj/dr
+        if (rsq < cn_thr) {
+          rcovij = (rcov[itype] + rcov[jtype]) * autoang;
+          expterm = exp(-K1*(rcovij/r-1.0));
+          dcn = -K1*rcovij*expterm/(r*r*(expterm+1.0)*(expterm+1.0)); // ok
+        } else {
+          dcn = 0.0;
+        };
+
+        fpair  = - tmp6 + (tmp6*alp6*t6*damp6) - tmp8 + (3/4*tmp8*alp8*t8*damp8);
+        fpair += - ((e6+e8)/C6) * dcn * (c6_res[i]+c6_res[2]) ;
         fpair *= factor_lj;
 
         f[i][0] += delx*fpair;
@@ -257,38 +269,37 @@ void PairDFTD3::compute(int eflag, int vflag)
           evdwl *= factor_lj;
         }
 
-        if (evflag) ev_tally(i,j,nlocal,newton_pair,evdwl,0.0,fpair,delx,dely,delz);
+        if (evflag) ev_tally(i,j,nlocal,newton_pair,evdwl,0.0,fpair,delx,dely,delz);  
       }
     }
   }
 
   if (vflag_fdotr) virial_fdotr_compute();
+  error->warning(FLERR,"Done one compute...");
+
 }
 
 void PairDFTD3::settings(int narg, char **arg)
 {
-  if (narg != 3) error->all(FLERR,"Illegal pair_style command");
+  if (narg != 6) error->all(FLERR,"Illegal pair_style command");
 
-  error->warning(FLERR,"Setting...");
   cutoff = utils::numeric(FLERR,arg[0],false,lmp);
   scale6 = utils::numeric(FLERR,arg[1],false,lmp);
   scale8 = utils::numeric(FLERR,arg[2],false,lmp);
-  error->warning(FLERR,"Done");
+  rscale6 = utils::numeric(FLERR,arg[3],false,lmp);
+  rscale8 = utils::numeric(FLERR,arg[4],false,lmp);
+  alpha = utils::numeric(FLERR,arg[5],false,lmp);
 
   if (allocated) {
     for (int i = 1; i <= atom->ntypes; i++)
       for (int j = i; j <= atom->ntypes; j++)
         if (setflag[i][j]) cut[i][j] = cutoff;
   }
-  error->warning(FLERR,"ntypes :");
-  error->warning(FLERR,std::to_string(atom->ntypes));
-
 }
 
 void PairDFTD3::coeff(int narg, char **arg)
 {
-  error->warning(FLERR,"Coefficients...");
-  if (narg < 6 || narg > 7) error->all(FLERR, "Incorrect args for pair coefficients");
+  if (narg < 5 || narg > 6) error->all(FLERR, "Incorrect args for pair coefficients");
 
   if (!allocated) allocate();
 
@@ -296,22 +307,21 @@ void PairDFTD3::coeff(int narg, char **arg)
   utils::bounds(FLERR,arg[0],1,atom->ntypes,ilo,ihi,error);
   utils::bounds(FLERR,arg[1],1,atom->ntypes,jlo,jhi,error);
 
-  double r0ab_one = utils::numeric(FLERR,arg[2],false,lmp);
-  rscale6 = utils::numeric(FLERR,arg[3],false,lmp);
-  rscale8 = utils::numeric(FLERR,arg[4],false,lmp);
-  alpha = utils::numeric(FLERR,arg[5],false,lmp);
+  int Zi = utils::numeric(FLERR,arg[2],false,lmp);
+  int Zj = utils::numeric(FLERR,arg[3],false,lmp);
+
+  double r0ab_one = utils::numeric(FLERR,arg[4],false,lmp);
 
   double cut_one = cutoff;
-  if (narg == 4) cut_one = utils::numeric(FLERR, arg[6], false, lmp);
+  if (narg == 6) cut_one = utils::numeric(FLERR, arg[5], false, lmp);
 
   for (int i = ilo; i <= ihi; i++) {
     for (int j = MAX(jlo,i); j <= jhi; j++) {
       r0ab[i][j] = r0ab_one;
       setflag[i][j] = 1;
+      map[i] = Zi; map[j] = Zj; 
     }
   }
-  error->warning(FLERR,"Done");
-
 }
 
 /* ---------------------------------------------------------------------------------------------------------- */
@@ -346,19 +356,14 @@ void PairDFTD3::init_style()
 
 double PairDFTD3::init_one(int i, int j)
 {
-  error->warning(FLERR,"Initializing...");
   if (setflag[i][j] == 0) error->all(FLERR,"All pair coeffs are not set");
   cut[j][i] = cut[i][j] = cutoff;
   return cutoff;
-  error->warning(FLERR,"Done...");
-
 }
 /* ---------------------------------------------------------------------------------------------------------- */
 
 void PairDFTD3::allocate()
 {
-  error->warning(FLERR,"Allocating...");
-
   allocated = 1;
   int n = atom->ntypes;
 
@@ -372,8 +377,6 @@ void PairDFTD3::allocate()
   memory->create(cut,n+1,n+1,"pair:cut");
   memory->create(cutsq,n+1,n+1,"pair:cutsq");
   memory->create(r0ab,n+1,n+1,"pair:r0ab");                   // not sure about this
-  error->warning(FLERR,"Done");
-
 }
 
 void PairDFTD3::calc_NCo()
@@ -381,7 +384,7 @@ void PairDFTD3::calc_NCo()
   int nj,*neighptrj;
   int *ilist,*jlist,*numneigh,**firstneigh;
   int inum,jnum,i,j,ii,jj,itype,jtype;
-  double rr,rco,rsq,delrj[3];
+  double rr,rcovij,rsq,delrj[3];
 
   double **x = atom->x;
   int *type  = atom->type;
@@ -393,7 +396,6 @@ void PairDFTD3::calc_NCo()
     //memory->grow(bbij,nmax,MAXNEIGH,"pair:bbij");
   }
 
-
   inum = list->inum ;// !
   ilist = list->ilist;
   numneigh = list->numneigh;
@@ -403,16 +405,10 @@ void PairDFTD3::calc_NCo()
 
   for (ii = 0; ii < inum; ii++) {
     i = ilist[ii];
+    itype = map[type[i]];
 
     nj = 0;
     neighptrj = ipage->vget();
-
-    itype = map[type[i]];
-
-    error->warning(FLERR,"itype : ");
-    error->warning(FLERR,std::to_string(itype));
-    error->warning(FLERR,std::to_string(type[i]));
-
     jlist = firstneigh[i];
     jnum = numneigh[i];
 
@@ -423,29 +419,21 @@ void PairDFTD3::calc_NCo()
       j = jlist[jj] & NEIGHMASK;
       jtype = map[type[j]];
 
-      delrj[0] = x[i][0] - x[j][0];
+      delrj[0] = x[i][0] - x[j][0];      
       delrj[1] = x[i][1] - x[j][1];
       delrj[2] = x[i][2] - x[j][2];
     
       rsq = delrj[0]*delrj[0] + delrj[1]*delrj[1] + delrj[2]*delrj[2];
 
-      error->warning(FLERR,"... before if ...");
-
       if (rsq > cn_thr) continue; //    warning HERE 
 
       neighptrj[nj++] = j;
-  
+
       rr = sqrt(rsq);
-      error->warning(FLERR,"... before rcov ...");
-      rco = rcov[itype] + rcov[jtype];
+      rcovij = (rcov[itype] + rcov[jtype]) * autoang;
 
-      error->warning(FLERR,"... NCo calculation ...");
-      NCo[i] += 1.0 / (1.0 + exp(K1 * ((rco/rr)-1.0)));
-      error->warning(FLERR,"... NCo calculation done ...");
-
+      NCo[i] += 1.0 / (1.0 + exp(-K1 * ((rcovij/rr)-1.0)));
     }
-
-    error->warning(FLERR,"...after if...");
 
     ipage->vgot(nj);
 
@@ -468,7 +456,7 @@ double PairDFTD3::getc6(int iat, int jat, double cni, double cnj){
 
   if (comm->me == 0) {
 
-    PotentialFileReader reader(lmp, "../../potentials/pars.dtd3", "DFTD3", false);
+    PotentialFileReader reader(lmp, "../../potentials/pars.dftd3", "DFTD3", false);
     char *line;
 
     while ((line = reader.next_line(NPARAMS_PER_LINE))) {
@@ -484,6 +472,11 @@ double PairDFTD3::getc6(int iat, int jat, double cni, double cnj){
       } catch (TokenizerException &e) {
         error->one(FLERR, e.what());
       }
+
+      // This part has to be changed : 
+      // reading should be done in one step in init_one(),
+      // here I should just access tensors c6ij[n+1][n+1][5][5], cni[n+1][5], cnj[n+1][5] 
+      // ask for suggestions.
 
       if (itype == iat && jtype == jat){
         r = (cni - cni_ref) * (cni - cni_ref) + (cnj - cnj_ref) * (cnj - cnj_ref);
@@ -506,6 +499,76 @@ double PairDFTD3::getc6(int iat, int jat, double cni, double cnj){
     }
   }  
   return c6;
+}
+
+double* PairDFTD3::getdc6(int iat, int jat, double cni, double cnj){
+
+  static double c6_res[3] = {};
+  double c6_ref, itype, jtype, cni_ref, cnj_ref;
+  double c6mem, r, r_save, expterm, term;
+  double num, den, dnumi, dnumj, ddeni, ddenj;
+
+  c6mem =-1.0E99, r_save = 1.0E99;
+  num = 0 ; den = 0 ; dnumi = 0 ; dnumj = 0; ddeni = 0; ddenj = 0; 
+
+  if (comm->me == 0) {
+
+    PotentialFileReader reader(lmp, "../../potentials/pars.dftd3", "DFTD3", false);
+    char *line;
+
+    while ((line = reader.next_line(NPARAMS_PER_LINE))) {
+      try {
+        ValueTokenizer values(line);
+
+        c6_ref  = values.next_double();
+        itype   = values.next_double();
+        jtype   = values.next_double();
+        cni_ref = values.next_double();
+        cnj_ref = values.next_double();
+
+      } catch (TokenizerException &e) {
+        error->one(FLERR, e.what());
+      }
+
+      // This part has to be changed : 
+      // reading should be done in one step in init_one(),
+      // here I should just access tensors c6ij[n+1][n+1][5][5], cni[n+1][5], cnj[n+1][5] 
+      // ask for suggestions.
+
+      if (itype == iat && jtype == jat){
+        r = (cni - cni_ref) * (cni - cni_ref) + (cnj - cnj_ref) * (cnj - cnj_ref);
+
+        if (r < r_save) {
+          r_save = r;
+          c6mem = c6_ref;
+        }
+
+        expterm=exp(K3*r);
+        
+        num += c6_ref*expterm;
+        den += expterm;
+
+        expterm = expterm*2.0*K3;
+
+        term = expterm*(cni-cni_ref);
+        dnumi += c6_ref*term;
+        ddeni += term;
+
+        term = expterm*(cnj-cnj_ref);
+        dnumj += c6_ref*term;
+        ddenj += term;
+      }
+    }
+
+    if (den > 1.0E-99) {
+      c6_res[0] = num / den;
+      c6_res[1] = ((dnumi*den)-(ddeni*num)) / (den*den);
+      c6_res[2] = ((dnumj*den)-(ddenj*num)) / (den*den);
+    } else {
+      c6_res[0] = c6mem; c6_res[1] = 0; c6_res[2] = 0;
+    }
+  }  
+  return c6_res;
 }
 
 /* ---------------------------------------------------------------------------------------------------------- */
