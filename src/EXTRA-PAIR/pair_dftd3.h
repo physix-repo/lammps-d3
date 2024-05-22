@@ -49,6 +49,8 @@ class PairDFTD3 : public Pair {
 
   double cutoff, scale6, scale8;
   double **cut,**r0ab, rscale6, rscale8, alpha;
+  double ***c6ij_refs, ***cni_refs, ***cnj_refs;
+  int **counter;
 
   int nmax;
   double *NCo;

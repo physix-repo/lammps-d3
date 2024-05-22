@@ -57,7 +57,7 @@ static constexpr double K3 = -4.0;
     values >5 might lead to bumps in the potential.
 */
 
-static constexpr double cn_thr = 100;  // 20*20 Bohr^2 ; 20 Bohr = 10.58 Angstrom  : 400
+static constexpr double cn_thr = 50;  // 20*20 Bohr^2 ; 20 Bohr = 10.58 Angstrom  : 400
 //static constexpr double cutoff = 1400;
 
 static constexpr int NPARAMS_PER_LINE = 5;
@@ -151,6 +151,12 @@ PairDFTD3::~PairDFTD3()
     memory->destroy(cut);
 
     memory->destroy(r0ab);
+
+    memory->destroy(c6ij_refs);
+    memory->destroy(cni_refs);
+    memory->destroy(cnj_refs);
+
+    memory->destroy(counter);
   }
 }
 
@@ -219,9 +225,9 @@ void PairDFTD3::compute(int eflag, int vflag)
         r8inv = r2inv*r2inv*r2inv*r2inv;
         r10inv = r2inv*r2inv*r2inv*r2inv*r2inv;
 
-        rr = r/r0ab[itype][jtype];
+        rr = r/r0ab[type[i]][type[j]];
 
-        double* c6_res = getdc6(itype,jtype,NCo[i],NCo[j]);
+        double* c6_res = getdc6(type[i],type[j],NCo[i],NCo[j]);
 
         double C6 = c6_res[0];
         double C8 = 3.0*C6*r2r4[itype]*r2r4[jtype];
@@ -251,7 +257,7 @@ void PairDFTD3::compute(int eflag, int vflag)
         };
 
         fpair  = - tmp6 + (tmp6*alp6*t6*damp6) - tmp8 + (3/4*tmp8*alp8*t8*damp8);
-        fpair += - ((e6+e8)/C6) * dcn * (c6_res[i]+c6_res[2]) ;
+        fpair += - ((e6+e8)/C6) * dcn * (c6_res[1]+c6_res[2]) ;
         fpair *= factor_lj;
 
         f[i][0] += delx*fpair;
@@ -275,7 +281,6 @@ void PairDFTD3::compute(int eflag, int vflag)
   }
 
   if (vflag_fdotr) virial_fdotr_compute();
-  error->warning(FLERR,"Done one compute...");
 
 }
 
@@ -357,7 +362,49 @@ void PairDFTD3::init_style()
 double PairDFTD3::init_one(int i, int j)
 {
   if (setflag[i][j] == 0) error->all(FLERR,"All pair coeffs are not set");
+
+  double c6_ref, itype, jtype, cni_ref, cnj_ref;
+  int c = 0;
+  
+  if (comm->me == 0) {
+
+    PotentialFileReader reader(lmp, "../../potentials/pars.dftd3", "DFTD3", false);
+    char *line;
+
+    while ((line = reader.next_line(NPARAMS_PER_LINE))) {
+      try {
+        ValueTokenizer values(line);
+
+        c6_ref  = values.next_double();
+        itype   = values.next_double();
+        jtype   = values.next_double();
+        cni_ref = values.next_double();
+        cnj_ref = values.next_double();
+
+      } catch (TokenizerException &e) {
+        error->one(FLERR, e.what());
+      }
+
+      // ex. i = 6; j = 14
+
+      if (itype == map[i] && jtype == map[j]){    // c6ref  6  14  cn6  cn14
+        c6ij_refs[i][j][c] = c6ij_refs[j][i][c] = c6_ref;
+        cni_refs[i][j][c] = cni_refs[j][i][c] = cni_ref;
+        cnj_refs[j][j][c] = cnj_refs[j][i][c] = cnj_ref;
+        c++;
+      } else
+      if (itype == map[j] && jtype == map[i]){   // c6ref  14  6  cn14  cn6
+        c6ij_refs[i][j][c] = c6ij_refs[j][i][c] = c6_ref;
+        cni_refs[i][j][c] = cni_refs[j][i][c] = cnj_ref;
+        cnj_refs[i][j][c] = cnj_refs[j][i][c] = cni_ref;
+        c++;
+      }
+    } 
+  }
+
+  counter[i][j] = counter[j][i] = c;
   cut[j][i] = cut[i][j] = cutoff;
+  
   return cutoff;
 }
 /* ---------------------------------------------------------------------------------------------------------- */
@@ -377,6 +424,11 @@ void PairDFTD3::allocate()
   memory->create(cut,n+1,n+1,"pair:cut");
   memory->create(cutsq,n+1,n+1,"pair:cutsq");
   memory->create(r0ab,n+1,n+1,"pair:r0ab");                   // not sure about this
+
+  memory->create(c6ij_refs,n+1,n+1,25,"pair:c6ij_refs");                // not sure about this
+  memory->create(cni_refs,n+1,n+1,25,"pair:cni_refs"); 
+  memory->create(cnj_refs,n+1,n+1,25,"pair:cnj_refs"); 
+  memory->create(counter,n+1,n+1,"pair:counter"); 
 }
 
 void PairDFTD3::calc_NCo()
@@ -404,6 +456,7 @@ void PairDFTD3::calc_NCo()
   ipage->reset();
 
   for (ii = 0; ii < inum; ii++) {
+
     i = ilist[ii];
     itype = map[type[i]];
 
@@ -416,13 +469,13 @@ void PairDFTD3::calc_NCo()
 
     for (jj = 0; jj < jnum; jj++) {
 
-      j = jlist[jj] & NEIGHMASK;
+      j = jlist[jj] &= NEIGHMASK;
       jtype = map[type[j]];
 
-      delrj[0] = x[i][0] - x[j][0];      
+      delrj[0] = x[i][0] - x[j][0];
       delrj[1] = x[i][1] - x[j][1];
       delrj[2] = x[i][2] - x[j][2];
-    
+        
       rsq = delrj[0]*delrj[0] + delrj[1]*delrj[1] + delrj[2]*delrj[2];
 
       if (rsq > cn_thr) continue; //    warning HERE 
@@ -511,62 +564,42 @@ double* PairDFTD3::getdc6(int iat, int jat, double cni, double cnj){
   c6mem =-1.0E99, r_save = 1.0E99;
   num = 0 ; den = 0 ; dnumi = 0 ; dnumj = 0; ddeni = 0; ddenj = 0; 
 
-  if (comm->me == 0) {
+  for (int c = 0; c < counter[iat][jat]; c++){ 
 
-    PotentialFileReader reader(lmp, "../../potentials/pars.dftd3", "DFTD3", false);
-    char *line;
+    c6_ref = c6ij_refs[iat][jat][c];
+    cni_ref = cni_refs[iat][jat][c];
+    cnj_ref = cnj_refs[iat][jat][c];
 
-    while ((line = reader.next_line(NPARAMS_PER_LINE))) {
-      try {
-        ValueTokenizer values(line);
+    r = (cni - cni_ref) * (cni - cni_ref) + (cnj - cnj_ref) * (cnj - cnj_ref);
 
-        c6_ref  = values.next_double();
-        itype   = values.next_double();
-        jtype   = values.next_double();
-        cni_ref = values.next_double();
-        cnj_ref = values.next_double();
+    if (r < r_save) {
+      r_save = r;
+      c6mem = c6_ref;
+    }
 
-      } catch (TokenizerException &e) {
-        error->one(FLERR, e.what());
-      }
-
-      // This part has to be changed : 
-      // reading should be done in one step in init_one(),
-      // here I should just access tensors c6ij[n+1][n+1][5][5], cni[n+1][5], cnj[n+1][5] 
-      // ask for suggestions.
-
-      if (itype == iat && jtype == jat){
-        r = (cni - cni_ref) * (cni - cni_ref) + (cnj - cnj_ref) * (cnj - cnj_ref);
-
-        if (r < r_save) {
-          r_save = r;
-          c6mem = c6_ref;
-        }
-
-        expterm=exp(K3*r);
+    expterm=exp(K3*r);
         
-        num += c6_ref*expterm;
-        den += expterm;
+    num += c6_ref*expterm;
+    den += expterm;
 
-        expterm = expterm*2.0*K3;
+    expterm = expterm*2.0*K3;
 
-        term = expterm*(cni-cni_ref);
-        dnumi += c6_ref*term;
-        ddeni += term;
+    term = expterm*(cni-cni_ref);
+    dnumi += c6_ref*term;
+    ddeni += term;
 
-        term = expterm*(cnj-cnj_ref);
-        dnumj += c6_ref*term;
-        ddenj += term;
-      }
-    }
+    term = expterm*(cnj-cnj_ref);
+    dnumj += c6_ref*term;
+    ddenj += term;
+  }
+  error->warning(FLERR,"Outside for ...");
 
-    if (den > 1.0E-99) {
-      c6_res[0] = num / den;
-      c6_res[1] = ((dnumi*den)-(ddeni*num)) / (den*den);
-      c6_res[2] = ((dnumj*den)-(ddenj*num)) / (den*den);
-    } else {
-      c6_res[0] = c6mem; c6_res[1] = 0; c6_res[2] = 0;
-    }
+  if (den > 1.0E-99) {
+    c6_res[0] = num / den;
+    c6_res[1] = ((dnumi*den)-(ddeni*num)) / (den*den);
+    c6_res[2] = ((dnumj*den)-(ddenj*num)) / (den*den);
+  } else {
+    c6_res[0] = c6mem; c6_res[1] = 0; c6_res[2] = 0;
   }  
   return c6_res;
 }
