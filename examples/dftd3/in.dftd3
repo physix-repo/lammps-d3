@@ -42,8 +42,9 @@ mass            1       28.06
 
 velocity        all create 50 5287287 loop geom
 
-pair_style      dftd3 10.0 1 0.722 1.217 1 14
-pair_coeff      1 1 14 14 1.75
+pair_style      dftd3 20.0 1 0.722 1.217 1 14
+#pair_coeff      1 1 14 14 1.75
+pair_coeff      1 1 14 14 1.896
 
 thermo_style    custom step temp epair etotal econserve press
 thermo          1
@@ -55,8 +56,8 @@ timestep        1.0e-3
 neighbor        1.0 bin
 neigh_modify    every 1 delay 10 check yes
 
-dump            1 all custom 1 dump.xyz id type x y z
+dump            1 all custom 1 dump.xyz id type x y z fx fy fz
 
-run             20
+run             1
 
 #write_restart   restart.NCo

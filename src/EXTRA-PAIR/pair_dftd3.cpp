@@ -57,7 +57,7 @@ static constexpr double K3 = -4.0;
     values >5 might lead to bumps in the potential.
 */
 
-static constexpr double cn_thr = 50;  // 20*20 Bohr^2 ; 20 Bohr = 10.58 Angstrom  : 400
+static constexpr double cn_thr = 400;  // 20*20 Bohr^2 ; 20 Bohr = 10.58 Angstrom  : 400
 //static constexpr double cutoff = 1400;
 
 static constexpr int NPARAMS_PER_LINE = 5;
@@ -70,7 +70,7 @@ static constexpr int NUM_ELEMENTS = 94;
 // autoang=0.52917726 :           rcov=k2*rcov/autoang
 // so this covalent radii shoud be in Angstrom units
 
-std::array<double, NUM_ELEMENTS> rcov = {
+std::array<double, NUM_ELEMENTS+1> rcov = {0,
     0.80628308, 1.15903197, 3.02356173, 2.36845659, 1.94011865,
     1.88972601, 1.78894056, 1.58736983, 1.61256616, 1.68815527,
     3.52748848, 3.14954334, 2.84718717, 2.62041997, 2.77159820,
@@ -93,12 +93,13 @@ std::array<double, NUM_ELEMENTS> rcov = {
 };
 
 static constexpr double autoang = 0.52917726 ;
+static constexpr double autoev = 27.21138505 ;
 
 //  r2r4 = sqrt(0.5*r2r4(i)*dfloat(i)**0.5 ) with i=elementnumber
 //  the large number of digits is just to keep the results consistent
 //  with older versions.
 
-std::array<double, NUM_ELEMENTS> r2r4 = {
+std::array<double, NUM_ELEMENTS+1> r2r4 = {0,
     2.00734898,  1.56637132,  5.01986934,  3.85379032,  3.64446594,
     3.10492822,  2.71175247,  2.59361680,  2.38825250,  2.21522516,
     6.58585536,  5.46295967,  5.65216669,  4.88284902,  4.29727576,
@@ -132,6 +133,10 @@ PairDFTD3::PairDFTD3(LAMMPS *lmp) : Pair(lmp)
   pgsize = oneatom = 0;
 
   r0ab = nullptr;
+
+  c6ij_refs = nullptr;
+  cni_refs = nullptr;
+  cnj_refs = nullptr;
 
   comm_forward = 1;
 }
@@ -196,6 +201,8 @@ void PairDFTD3::compute(int eflag, int vflag)
     i = ilist[ii];
     itype = map[type[i]];
 
+    error->warning(FLERR," Z = " + std::to_string(itype) + " ; CN = " + std::to_string(NCo[i]) + " ; R0 = " + std::to_string(r0ab[type[i]][type[j]]));
+
     xtmp = x[i][0];
     ytmp = x[i][1];
     ztmp = x[i][2];
@@ -216,8 +223,8 @@ void PairDFTD3::compute(int eflag, int vflag)
 
       rsq = delx*delx + dely*dely + delz*delz;
     
-//     if (rsq < cutsq[itype][jtype]) {
-      if (rsq < cutoff*cutoff) {
+      if (rsq < cutsq[type[i]][type[j]]) {
+//      if (rsq < cutoff*cutoff) {
 
         r = sqrt(rsq);
         r2inv = 1.0/rsq;
@@ -225,12 +232,17 @@ void PairDFTD3::compute(int eflag, int vflag)
         r8inv = r2inv*r2inv*r2inv*r2inv;
         r10inv = r2inv*r2inv*r2inv*r2inv*r2inv;
 
-        rr = r/r0ab[type[i]][type[j]];
+        rr = r/r0ab[type[i]][type[j]];  // r0ab is in Angstrom
 
         double* c6_res = getdc6(type[i],type[j],NCo[i],NCo[j]);
 
+        // I want C6 in [eV*AA**6] and C8 in [eV*AA*8]
         double C6 = c6_res[0];
-        double C8 = 3.0*C6*r2r4[itype]*r2r4[jtype];
+        double C8 = 3.0*C6*r2r4[itype]*r2r4[jtype]*autoang*autoang;
+
+        if (r < 2*r0ab[type[i]][type[j]]){
+          error->warning(FLERR," C6 = " + std::to_string(C6) + " ; C8 = " + std::to_string(C8));
+        }
 
         double alp6 = alpha;
         double alp8 = alpha+2;
@@ -241,9 +253,12 @@ void PairDFTD3::compute(int eflag, int vflag)
         t8 = pow(rscale8/rr,alp8);
         damp8 =1.0/(1.0+6.0*t8 );
 
-        e6 = -scale6*C6*damp6*r6inv;
-        e8 = -scale8*C8*damp8*r8inv;
+        e6 = C6*damp6*r6inv;
+        e8 = C8*damp8*r8inv;
 
+        if (r < 2*r0ab[type[i]][type[j]]){
+          error->warning(FLERR," e6 = " + std::to_string(e6) + " ; e8 = " + std::to_string(e8) + " ; e8/E = " + std::to_string(100*e8/(e6+e8)));
+        }
         tmp6 = 6*scale6*C6*r8inv*damp6;
         tmp8 = 8*scale8*C8*r10inv*damp8;
 
@@ -251,13 +266,19 @@ void PairDFTD3::compute(int eflag, int vflag)
         if (rsq < cn_thr) {
           rcovij = (rcov[itype] + rcov[jtype]) * autoang;
           expterm = exp(-K1*(rcovij/r-1.0));
-          dcn = -K1*rcovij*expterm/(r*r*(expterm+1.0)*(expterm+1.0)); // ok
+          dcn = -K1*rcovij*expterm/(rsq*(expterm+1.0)*(expterm+1.0)); // ok
         } else {
           dcn = 0.0;
         };
 
-        fpair  = - tmp6 + (tmp6*alp6*t6*damp6) - tmp8 + (3/4*tmp8*alp8*t8*damp8);
-        fpair += - ((e6+e8)/C6) * dcn * (c6_res[1]+c6_res[2]) ;
+        double fpair1 = - tmp6 - tmp8 ;
+        double fpair2 = tmp6*alp6*t6*damp6 + 3/4*tmp8*alp8*t8*damp8 ;
+        double fpair3 = ((scale6*e6+scale8*e8)/C6) * dcn * (c6_res[1]+c6_res[2])/r ;
+        fpair = fpair1 + fpair2 + fpair3 ;
+
+        if (r < 2*r0ab[type[i]][type[j]]){
+          error->warning(FLERR," f1 = " + std::to_string(fpair1/fpair) + " ; f2 = " + std::to_string(fpair2/fpair) + " ; f3 = " + std::to_string(fpair3/fpair));
+        }
         fpair *= factor_lj;
 
         f[i][0] += delx*fpair;
@@ -271,7 +292,7 @@ void PairDFTD3::compute(int eflag, int vflag)
         }
 
         if (eflag) {
-          evdwl = e6 + e8;
+          evdwl = -scale6*e6 - scale8*e8;
           evdwl *= factor_lj;
         }
 
@@ -404,7 +425,7 @@ double PairDFTD3::init_one(int i, int j)
 
   counter[i][j] = counter[j][i] = c;
   cut[j][i] = cut[i][j] = cutoff;
-  
+
   return cutoff;
 }
 /* ---------------------------------------------------------------------------------------------------------- */
@@ -567,6 +588,7 @@ double* PairDFTD3::getdc6(int iat, int jat, double cni, double cnj){
   for (int c = 0; c < counter[iat][jat]; c++){ 
 
     c6_ref = c6ij_refs[iat][jat][c];
+    c6_ref *= autoev*pow(autoang,6);
     cni_ref = cni_refs[iat][jat][c];
     cnj_ref = cnj_refs[iat][jat][c];
 
@@ -592,7 +614,6 @@ double* PairDFTD3::getdc6(int iat, int jat, double cni, double cnj){
     dnumj += c6_ref*term;
     ddenj += term;
   }
-  error->warning(FLERR,"Outside for ...");
 
   if (den > 1.0E-99) {
     c6_res[0] = num / den;
